@@ -1078,7 +1078,12 @@ public:
             }
 
             if( isValidSCloopFactor == true ) {
+
                 correctionCameraFrame = icp.getFinalTransformation(); // get transformation in camera frame (because points are in camera frame)
+                // double tt1 = 
+                // icp.align(*unused_result, correctionCameraFrame.matrix()); 
+                // correctionCameraFrame = icp.getFinalTransformation();
+
                 pcl::getTranslationAndEulerAngles (correctionCameraFrame, x, y, z, roll, pitch, yaw);
                 gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
                 gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
@@ -1087,6 +1092,10 @@ public:
                 // gtSAMgraph.add(BetweenFactor<Pose3>(latestFrameIDLoopCloure, closestHistoryFrameID, poseFrom.between(poseTo), constraintNoise)); // original 
                 gtSAMgraph.add(BetweenFactor<Pose3>(latestFrameIDLoopCloure, SCclosestHistoryFrameID, poseFrom.between(poseTo), robustNoiseModel)); // giseop
                 isam->update(gtSAMgraph);
+                isam->update();
+                isam->update();
+                isam->update();
+                isam->update();
                 isam->update();
                 
                 gtSAMgraph.resize(0);
@@ -1564,15 +1573,6 @@ public:
          */
         isam->update(gtSAMgraph, initialEstimate);
         isam->update();
-
-        if(aLoopIsClosed == true)
-        {
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-            isam->update();
-        }
         
         gtSAMgraph.resize(0);
         initialEstimate.clear();
