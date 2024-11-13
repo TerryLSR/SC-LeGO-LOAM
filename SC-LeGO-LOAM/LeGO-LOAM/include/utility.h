@@ -1,110 +1,195 @@
-#pragma once
+#ifndef _UTILITY_LIDAR_ODOMETRY_H_
+#define _UTILITY_LIDAR_ODOMETRY_H_
 
-#include <ctime>
-#include <cassert>
-#include <cmath>
-#include <utility>
-#include <vector>
-#include <algorithm> 
-#include <cstdlib>
-#include <memory>
-#include <iostream>
 
-#include <Eigen/Dense>
+#include <ros/ros.h>
+
+#include <sensor_msgs/Imu.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <nav_msgs/Odometry.h>
+
+#include "cloud_msgs/cloud_info.h"
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/core/eigen.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include <cv_bridge/cv_bridge.h>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/filters/voxel_grid.h>
+#include <pcl_ros/point_cloud.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <pcl/range_image/range_image.h>
+#include <pcl/filters/filter.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/common/common.h>
+#include <pcl/registration/icp.h>
 
-#include "nanoflann.hpp"
-#include "KDTreeVectorOfVectorsAdaptor.h"
+#include <tf/transform_broadcaster.h>
+#include <tf/transform_datatypes.h>
+ 
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <queue>
+#include <deque>
+#include <iostream>
+#include <fstream>
+#include <ctime>
+#include <cfloat>
+#include <iterator>
+#include <sstream>
+#include <string>
+#include <limits>
+#include <iomanip>
+#include <array>
+#include <thread>
+#include <mutex>
 
-#include "tictoc.h"
+#define PI 3.14159265
 
-using namespace Eigen;
-using namespace nanoflann;
+using namespace std;
+// rosbag filter "HK-Data20190316-2 20190331_NJ_LL.bag" "lidaronly_HK-Data20190316-2 20190331_NJ_LL.bag" "topic == '/velodyne_points'"
+// rosbag filter "HK-Data20190117.bag" "lidaronly_HK-Data20190117.bag" "topic == '/velodyne_points'"
 
-using std::cout;
-using std::endl;
-using std::make_pair;
+typedef pcl::PointXYZI  PointType;
 
-using std::atan2;
-using std::cos;
-using std::sin;
+// extern const string pointCloudTopic = "/velodyne_points";
+// extern const string pointCloudTopic = "/kitti_scan";
+extern const string pointCloudTopic = "/pandar";
+extern const string imuTopic = "/IMU_data_USB0";
 
-using SCPointType = pcl::PointXYZI; // using xyz only. but a user can exchange the original bin encoding function (i.e., max hegiht) to max intensity (for detail, refer 20 ICRA Intensity Scan Context)
-using KeyMat = std::vector<std::vector<float> >;
-using InvKeyTree = KDTreeVectorOfVectorsAdaptor< KeyMat, float >;
+// Save pcd
+extern const string fileDirectory = "/tmp/";
+
+// Using velodyne cloud "ring" channel for image projection (other lidar may have different name for this channel, change "PointXYZIR" below)
+extern const bool useCloudRing = false; // if true, ang_res_y and ang_bottom are not used
+
+// VLP-16
+extern const int N_SCAN = 16;
+extern const int Horizon_SCAN = 2000;
+extern const float ang_res_x = 0.18;
+extern const float ang_res_y = 2.0;
+extern const float ang_bottom = 15.0+0.1;
+extern const int groundScanInd = 6;
+
+// HDL-32E
+// extern const int N_SCAN = 32;
+// extern const int Horizon_SCAN = 1800;
+// extern const float ang_res_x = 360.0/float(Horizon_SCAN);
+// extern const float ang_res_y = 41.33/float(N_SCAN-1);
+// extern const float ang_bottom = 30.67;
+// extern const int groundScanInd = 20;
+
+// VLS-128
+// extern const int N_SCAN = 128;
+// extern const int Horizon_SCAN = 1800;
+// extern const float ang_res_x = 0.2;
+// extern const float ang_res_y = 0.3;
+// extern const float ang_bottom = 25.0;
+// extern const int groundScanInd = 10;
+
+// Ouster users may need to uncomment line 159 in imageProjection.cpp
+// Usage of Ouster imu data is not fully supported yet (LeGO-LOAM needs 9-DOF IMU), please just publish point cloud data
+// Ouster OS1-16
+// extern const int N_SCAN = 16;
+// extern const int Horizon_SCAN = 1024;
+// extern const float ang_res_x = 360.0/float(Horizon_SCAN);
+// extern const float ang_res_y = 33.2/float(N_SCAN-1);
+// extern const float ang_bottom = 16.6+0.1;
+// extern const int groundScanInd = 7;
+
+// Ouster OS1-64
+// extern const int N_SCAN = 64;
+// extern const int Horizon_SCAN = 1024;
+// extern const float ang_res_x = 360.0/float(Horizon_SCAN);
+// extern const float ang_res_y = 33.2/float(N_SCAN-1);
+// extern const float ang_bottom = 16.6+0.1;
+// extern const int groundScanInd = 15;
+
+extern const bool loopClosureEnableFlag = true;
+extern const double mappingProcessInterval = 0.3;
+
+extern const float scanPeriod = 0.1;
+extern const int systemDelay = 0;
+extern const int imuQueLength = 200;
+
+extern const float sensorMinimumRange = 1.0;
+extern const float sensorMountAngle = 0.0;
+extern const float segmentTheta = 60.0/180.0*M_PI; // decrese this value may improve accuracy
+extern const int segmentValidPointNum = 5;
+extern const int segmentValidLineNum = 3;
+extern const float segmentAlphaX = ang_res_x / 180.0 * M_PI;
+extern const float segmentAlphaY = ang_res_y / 180.0 * M_PI;
 
 
-// namespace SC2
-// {
-
-void coreImportTest ( void );
-
-
-// sc param-independent helper functions 
-float xy2theta( const float & _x, const float & _y );
-MatrixXd circshift( MatrixXd &_mat, int _num_shift );
-std::vector<float> eig2stdvec( MatrixXd _eigmat );
+extern const int edgeFeatureNum = 2;
+extern const int surfFeatureNum = 4;
+extern const int sectionsTotal = 6;
+extern const float edgeThreshold = 0.1;
+extern const float surfThreshold = 0.1;
+extern const float nearestFeatureSearchSqDist = 25;
 
 
-class SCManager
+// Mapping Params
+extern const float surroundingKeyframeSearchRadius = 50.0; // key frame that is within n meters from current pose will be considerd for scan-to-map optimization (when loop closure disabled)
+extern const int   surroundingKeyframeSearchNum = 50; // submap size (when loop closure enabled)
+
+// history key frames (history submap for loop closure)
+extern const float historyKeyframeSearchRadius = 20.0; // NOT used in Scan Context-based loop detector / default 7.0; key frame that is within n meters from current pose will be considerd for loop closure
+extern const int   historyKeyframeSearchNum = 25; // 2n+1 number of history key frames will be fused into a submap for loop closure
+extern const float historyKeyframeFitnessScore = 0.35; // default 0.3; the smaller the better alignment
+
+extern const float globalMapVisualizationSearchRadius = 1500.0; // key frames with in n meters will be visualized
+
+
+struct smoothness_t{ 
+    float value;
+    size_t ind;
+};
+
+struct by_value{ 
+    bool operator()(smoothness_t const &left, smoothness_t const &right) { 
+        return left.value < right.value;
+    }
+};
+
+/*
+    * A point cloud type that has "ring" channel
+    */
+struct PointXYZIR
 {
-public: 
-    SCManager( ) = default; // reserving data space (of std::vector) could be considered. but the descriptor is lightweight so don't care.
+    PCL_ADD_POINT4D
+    PCL_ADD_INTENSITY;
+    uint16_t ring;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
 
-    Eigen::MatrixXd makeScancontext( pcl::PointCloud<SCPointType> & _scan_down );
-    Eigen::MatrixXd makeRingkeyFromScancontext( Eigen::MatrixXd &_desc );
-    Eigen::MatrixXd makeSectorkeyFromScancontext( Eigen::MatrixXd &_desc );
+POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIR,  
+                                   (float, x, x) (float, y, y)
+                                   (float, z, z) (float, intensity, intensity)
+                                   (uint16_t, ring, ring)
+)
 
-    int fastAlignUsingVkey ( MatrixXd & _vkey1, MatrixXd & _vkey2 ); 
-    double distDirectSC ( MatrixXd &_sc1, MatrixXd &_sc2 ); // "d" (eq 5) in the original paper (IROS 18)
-    std::pair<double, int> distanceBtnScanContext ( MatrixXd &_sc1, MatrixXd &_sc2 ); // "D" (eq 6) in the original paper (IROS 18)
+/*
+    * A point cloud type that has 6D pose info ([x,y,z,roll,pitch,yaw] intensity is time stamp)
+    */
+struct PointXYZIRPYT
+{
+    PCL_ADD_POINT4D
+    PCL_ADD_INTENSITY;
+    float roll;
+    float pitch;
+    float yaw;
+    double time;
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
 
-    // User-side API
-    void makeAndSaveScancontextAndKeys( pcl::PointCloud<SCPointType> & _scan_down );
-    std::pair<int, float> detectLoopClosureID( void ); // int: nearest node index, float: relative yaw  
+POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRPYT,
+                                   (float, x, x) (float, y, y)
+                                   (float, z, z) (float, intensity, intensity)
+                                   (float, roll, roll) (float, pitch, pitch) (float, yaw, yaw)
+                                   (double, time, time)
+)
 
-public:
-    // hyper parameters ()
-    const double LIDAR_HEIGHT = 2.0; // lidar height : add this for simply directly using lidar scan in the lidar local coord (not robot base coord) / if you use robot-coord-transformed lidar scans, just set this as 0.
+typedef PointXYZIRPYT  PointTypePose;
 
-    const int    PC_NUM_RING = 20; // 20 in the original paper (IROS 18)
-    const int    PC_NUM_SECTOR = 60; // 60 in the original paper (IROS 18)
-    const double PC_MAX_RADIUS = 80.0; // 80 meter max in the original paper (IROS 18)
-    const double PC_UNIT_SECTORANGLE = 360.0 / double(PC_NUM_SECTOR);
-    const double PC_UNIT_RINGGAP = PC_MAX_RADIUS / double(PC_NUM_RING);
-
-    // tree
-    const int    NUM_EXCLUDE_RECENT = 50; // simply just keyframe gap, but node position distance-based exclusion is ok. 
-    const int    NUM_CANDIDATES_FROM_TREE = 10; // 10 is enough. (refer the IROS 18 paper)
-
-    // loop thres
-    const double SEARCH_RATIO = 0.1; // for fast comparison, no Brute-force, but search 10 % is okay. // not was in the original conf paper, but improved ver.
-    // const double SC_DIST_THRES = 0.13; // empirically 0.1-0.2 is fine (rare false-alarms) for 20x60 polar context (but for 0.15 <, DCS or ICP fit score check (e.g., in LeGO-LOAM) should be required for robustness)
-    const double SC_DIST_THRES = 0.5; // 0.4-0.6 is good choice for using with robust kernel (e.g., Cauchy, DCS) + icp fitness threshold / if not, recommend 0.1-0.15
-
-    // config 
-    const int    TREE_MAKING_PERIOD_ = 10; // i.e., remaking tree frequency, to avoid non-mandatory every remaking, to save time cost / in the LeGO-LOAM integration, it is synchronized with the loop detection callback (which is 1Hz) so it means the tree is updated evrey 10 sec. But you can use the smaller value because it is enough fast ~ 5-50ms wrt N.
-    int          tree_making_period_conter = 0;
-
-    // data 
-    std::vector<double> polarcontexts_timestamp_; // optional.
-    std::vector<Eigen::MatrixXd> polarcontexts_;
-    std::vector<Eigen::MatrixXd> polarcontext_invkeys_;
-    std::vector<Eigen::MatrixXd> polarcontext_vkeys_;
-
-    KeyMat polarcontext_invkeys_mat_;
-    KeyMat polarcontext_invkeys_to_search_;
-    std::unique_ptr<InvKeyTree> polarcontext_tree_;
-
-}; // SCManager
-
-// } // namespace SC2
+#endif
