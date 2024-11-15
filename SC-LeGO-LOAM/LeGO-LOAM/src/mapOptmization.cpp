@@ -233,6 +233,11 @@ private:
     // // loop detector 
     SCManager scManager;
 
+    vector<pair<int, int>> loopIndexQueue;
+    vector<gtsam::Pose3> loopPoseQueue;
+    // vector<gtsam::noiseModel::Diagonal::shared_ptr> loopNoiseQueue; // Diagonal <- Gausssian <- Base
+    vector<gtsam::SharedNoiseModel> loopNoiseQueue; // giseop for polymorhpisam (Diagonal <- Gausssian <- Base)
+
 public:
 
     mapOptimization():
@@ -838,6 +843,30 @@ public:
         }
     } // loopClosureThread
 
+    void addLoopFactor()
+    {
+        if (loopIndexQueue.empty())
+            return;
+
+        for (int i = 0; i < (int)loopIndexQueue.size(); ++i)
+        {
+            int indexFrom = loopIndexQueue[i].first;
+            int indexTo = loopIndexQueue[i].second;
+            gtsam::Pose3 poseBetween = loopPoseQueue[i];
+            // gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i]; // original 
+            auto noiseBetween = loopNoiseQueue[i]; // giseop for polymorhpism // shared_ptr<gtsam::noiseModel::Base>, typedef noiseModel::Base::shared_ptr gtsam::SharedNoiseModel
+            gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
+
+            // writeEdge({indexFrom, indexTo}, poseBetween); // giseop
+        }
+
+        loopIndexQueue.clear();
+        loopPoseQueue.clear();
+        loopNoiseQueue.clear();
+
+        aLoopIsClosed = true;
+    }
+
 
     bool detectLoopClosure(){
 
@@ -1090,13 +1119,15 @@ public:
                 
                 std::lock_guard<std::mutex> lock(mtx);
                 // gtSAMgraph.add(BetweenFactor<Pose3>(latestFrameIDLoopCloure, closestHistoryFrameID, poseFrom.between(poseTo), constraintNoise)); // original 
-                gtSAMgraph.add(BetweenFactor<Pose3>(latestFrameIDLoopCloure, SCclosestHistoryFrameID, poseFrom.between(poseTo), robustNoiseModel)); // giseop
-                isam->update(gtSAMgraph);
-                isam->update();
-                isam->update();
-                isam->update();
-                isam->update();
-                isam->update();
+                float noiseScore = icp.getFitnessScore();
+                Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
+                noiseModel::Base::shared_ptr robust_noise = gtsam::noiseModel::Robust::Create(
+                    gtsam::noiseModel::mEstimator::Cauchy::Create(1), // optional: replacing Cauchy by DCS or GemanMcClure
+                    gtsam::noiseModel::Diagonal::Variances(Vector6)
+                );
+                loopIndexQueue.push_back(make_pair(latestFrameIDLoopCloure, SCclosestHistoryFrameID));
+                loopPoseQueue.push_back(poseFrom.between(poseTo));
+                loopNoiseQueue.push_back(robust_noise);
                 
                 gtSAMgraph.resize(0);
             }
@@ -1568,11 +1599,22 @@ public:
             initialEstimate.insert(cloudKeyPoses3D->points.size(), Pose3(Rot3::RzRyRx(transformAftMapped[2], transformAftMapped[0], transformAftMapped[1]),
                                                                      		   Point3(transformAftMapped[5], transformAftMapped[3], transformAftMapped[4])));
         }
+
+        addLoopFactor(); //add and then update together,the pose will be more smoother
         /**
          * update iSAM
          */
         isam->update(gtSAMgraph, initialEstimate);
         isam->update();
+
+        if (aLoopIsClosed == true)
+        {
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+            isam->update();
+        }
         
         gtSAMgraph.resize(0);
         initialEstimate.clear();
