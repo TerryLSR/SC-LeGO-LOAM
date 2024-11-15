@@ -45,6 +45,8 @@
 
 #include "Scancontext.h"
 #include "utility.h"
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
 
 using namespace gtsam;
 
@@ -73,6 +75,7 @@ private:
     ros::Publisher pubIcpKeyFrames;
     ros::Publisher pubRecentKeyFrames;
     ros::Publisher pubRegisteredCloud;
+    ros::Publisher pubLoopConstraintEdge;
 
     ros::Subscriber subLaserCloudRaw;
     ros::Subscriber subLaserCloudCornerLast;
@@ -104,6 +107,7 @@ private:
 
     pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;
     pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;
+    pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D;
 
     
     pcl::PointCloud<PointType>::Ptr surroundingKeyPoses;
@@ -237,6 +241,16 @@ private:
     vector<gtsam::Pose3> loopPoseQueue;
     // vector<gtsam::noiseModel::Diagonal::shared_ptr> loopNoiseQueue; // Diagonal <- Gausssian <- Base
     vector<gtsam::SharedNoiseModel> loopNoiseQueue; // giseop for polymorhpisam (Diagonal <- Gausssian <- Base)
+    typedef struct _LOOP_IDX_
+    {
+        int cur_idx;
+        int history_idx;
+        bool operator < (const _LOOP_IDX_ &o) const
+        {
+            return cur_idx < o.cur_idx || history_idx < o.history_idx;
+        }
+    }LOOPIDX;
+    multimap<LOOPIDX, int> loopIndexContainer;
 
 public:
 
@@ -258,6 +272,8 @@ public:
         subOutlierCloudLast = nh.subscribe<sensor_msgs::PointCloud2>("/outlier_cloud_last", 2, &mapOptimization::laserCloudOutlierLastHandler, this);
         subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("/laser_odom_to_init", 5, &mapOptimization::laserOdometryHandler, this);
         subImu = nh.subscribe<sensor_msgs::Imu> (imuTopic, 50, &mapOptimization::imuHandler, this);
+
+        pubLoopConstraintEdge = nh.advertise<visualization_msgs::MarkerArray>("/loop_closure_constraints", 1);
 
         pubHistoryKeyFrames = nh.advertise<sensor_msgs::PointCloud2>("/history_cloud", 2);
         pubIcpKeyFrames = nh.advertise<sensor_msgs::PointCloud2>("/corrected_cloud", 2);
@@ -289,6 +305,8 @@ public:
 
         cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
         cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
+
+        copy_cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
 
         kdtreeSurroundingKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
         kdtreeHistoryKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
@@ -840,8 +858,59 @@ public:
         while (ros::ok()){
             rate.sleep();
             performLoopClosure();
+            visualizeLoopClosure();
         }
     } // loopClosureThread
+
+    void visualizeLoopClosure()
+    {
+        visualization_msgs::MarkerArray markerArray;
+        // loop nodes
+        visualization_msgs::Marker markerNode;
+        markerNode.header.frame_id = "camera_init";
+        markerNode.header.stamp = ros::Time::now();
+        markerNode.action = visualization_msgs::Marker::ADD;
+        markerNode.type = visualization_msgs::Marker::SPHERE_LIST;
+        markerNode.ns = "loop_nodes";
+        markerNode.id = 0;
+        markerNode.pose.orientation.w = 1;
+        markerNode.scale.x = 0.3; markerNode.scale.y = 0.3; markerNode.scale.z = 0.3; 
+        markerNode.color.r = 0; markerNode.color.g = 0.8; markerNode.color.b = 1;
+        markerNode.color.a = 1;
+        // loop edges
+        visualization_msgs::Marker markerEdge;
+        markerEdge.header.frame_id = "camera_init";
+        markerEdge.header.stamp = ros::Time::now();
+        markerEdge.action = visualization_msgs::Marker::ADD;
+        markerEdge.type = visualization_msgs::Marker::LINE_LIST;
+        markerEdge.ns = "loop_edges";
+        markerEdge.id = 1;
+        markerEdge.pose.orientation.w = 1;
+        markerEdge.scale.x = 0.1; markerEdge.scale.y = 0.1; markerEdge.scale.z = 0.1;
+        markerEdge.color.r = 0.9; markerEdge.color.g = 0.9; markerEdge.color.b = 0;
+        markerEdge.color.a = 1;
+
+        for (auto it = loopIndexContainer.begin(); it != loopIndexContainer.end(); ++it)
+        {
+            int key_cur = it->first.cur_idx;
+            int key_pre = it->first.history_idx;
+            geometry_msgs::Point p;
+            p.x = copy_cloudKeyPoses6D->points[key_cur].x;
+            p.y = copy_cloudKeyPoses6D->points[key_cur].y;
+            p.z = copy_cloudKeyPoses6D->points[key_cur].z;
+            markerNode.points.push_back(p);
+            markerEdge.points.push_back(p);
+            p.x = copy_cloudKeyPoses6D->points[key_pre].x;
+            p.y = copy_cloudKeyPoses6D->points[key_pre].y;
+            p.z = copy_cloudKeyPoses6D->points[key_pre].z;
+            markerNode.points.push_back(p);
+            markerEdge.points.push_back(p);
+        }
+
+        markerArray.markers.push_back(markerNode);
+        markerArray.markers.push_back(markerEdge);
+        pubLoopConstraintEdge.publish(markerArray);
+    }
 
     void addLoopFactor()
     {
@@ -876,65 +945,66 @@ public:
          * 1. xyz distance-based radius search (contained in the original LeGO LOAM code)
          * - for fine-stichting trajectories (for not-recognized nodes within scan context search) 
          */
-        RSlatestSurfKeyFrameCloud->clear();
-        RSnearHistorySurfKeyFrameCloud->clear();
-        RSnearHistorySurfKeyFrameCloudDS->clear();
+        // RSlatestSurfKeyFrameCloud->clear();
+        // RSnearHistorySurfKeyFrameCloud->clear();
+        // RSnearHistorySurfKeyFrameCloudDS->clear();
 
-        // find the closest history key frame
-        std::vector<int> pointSearchIndLoop;
-        std::vector<float> pointSearchSqDisLoop;
-        kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
-        kdtreeHistoryKeyPoses->radiusSearch(currentRobotPosPoint, historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
+        // // find the closest history key frame
+        // std::vector<int> pointSearchIndLoop;
+        // std::vector<float> pointSearchSqDisLoop;
+        // kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
+        // kdtreeHistoryKeyPoses->radiusSearch(currentRobotPosPoint, historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
         
-        RSclosestHistoryFrameID = -1;
-        int curMinID = 1000000;
-        // policy: take Oldest one (to fix error of the whole trajectory)
-        for (int i = 0; i < pointSearchIndLoop.size(); ++i){
-            int id = pointSearchIndLoop[i];
-            if (abs(cloudKeyPoses6D->points[id].time - timeLaserOdometry) > 30.0){
-                // RSclosestHistoryFrameID = id;
-                // break;
-                if( id < curMinID ) {
-                    curMinID = id;
-                    RSclosestHistoryFrameID = curMinID;
-                }
-            }
-        }
+        // RSclosestHistoryFrameID = -1;
+        // int curMinID = 1000000;
+        // // policy: take Oldest one (to fix error of the whole trajectory)
+        // for (int i = 0; i < pointSearchIndLoop.size(); ++i){
+        //     int id = pointSearchIndLoop[i];
+        //     if (abs(cloudKeyPoses6D->points[id].time - timeLaserOdometry) > 30.0){
+        //         // RSclosestHistoryFrameID = id;
+        //         // break;
+        //         if( id < curMinID ) {
+        //             curMinID = id;
+        //             RSclosestHistoryFrameID = curMinID;
+        //         }
+        //     }
+        // }
 
-        if (RSclosestHistoryFrameID == -1){
-            // Do nothing here
-            // then, do the next check: Scan context-based search 
-            // not return false here;
-        }
-        else {
-            // save latest key frames
-            latestFrameIDLoopCloure = cloudKeyPoses3D->points.size() - 1;
-            *RSlatestSurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[latestFrameIDLoopCloure], &cloudKeyPoses6D->points[latestFrameIDLoopCloure]);
-            *RSlatestSurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[latestFrameIDLoopCloure],   &cloudKeyPoses6D->points[latestFrameIDLoopCloure]);
-            pcl::PointCloud<PointType>::Ptr RShahaCloud(new pcl::PointCloud<PointType>());
-            int cloudSize = RSlatestSurfKeyFrameCloud->points.size();
-            for (int i = 0; i < cloudSize; ++i){
-                if ((int)RSlatestSurfKeyFrameCloud->points[i].intensity >= 0){
-                    RShahaCloud->push_back(RSlatestSurfKeyFrameCloud->points[i]);
-                }
-            }
-            RSlatestSurfKeyFrameCloud->clear();
-            *RSlatestSurfKeyFrameCloud = *RShahaCloud;
+        // if (RSclosestHistoryFrameID == -1){
+        //     // Do nothing here
+        //     // then, do the next check: Scan context-based search 
+        //     // not return false here;
+        // }
+        // else {
+        //     // save latest key frames
+        //     latestFrameIDLoopCloure = cloudKeyPoses3D->points.size() - 1;
+        //     *RSlatestSurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[latestFrameIDLoopCloure], &cloudKeyPoses6D->points[latestFrameIDLoopCloure]);
+        //     *RSlatestSurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[latestFrameIDLoopCloure],   &cloudKeyPoses6D->points[latestFrameIDLoopCloure]);
+        //     pcl::PointCloud<PointType>::Ptr RShahaCloud(new pcl::PointCloud<PointType>());
+        //     int cloudSize = RSlatestSurfKeyFrameCloud->points.size();
+        //     for (int i = 0; i < cloudSize; ++i){
+        //         if ((int)RSlatestSurfKeyFrameCloud->points[i].intensity >= 0){
+        //             RShahaCloud->push_back(RSlatestSurfKeyFrameCloud->points[i]);
+        //         }
+        //     }
+        //     RSlatestSurfKeyFrameCloud->clear();
+        //     *RSlatestSurfKeyFrameCloud = *RShahaCloud;
 
-            // save history near key frames
-            for (int j = -historyKeyframeSearchNum; j <= historyKeyframeSearchNum; ++j){
-                if (RSclosestHistoryFrameID + j < 0 || RSclosestHistoryFrameID + j > latestFrameIDLoopCloure)
-                    continue;
-                *RSnearHistorySurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[RSclosestHistoryFrameID+j], &cloudKeyPoses6D->points[RSclosestHistoryFrameID+j]);
-                *RSnearHistorySurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[RSclosestHistoryFrameID+j],   &cloudKeyPoses6D->points[RSclosestHistoryFrameID+j]);
-            }
-            downSizeFilterHistoryKeyFrames.setInputCloud(RSnearHistorySurfKeyFrameCloud);
-            downSizeFilterHistoryKeyFrames.filter(*RSnearHistorySurfKeyFrameCloudDS);
-        }
+        //     // save history near key frames
+        //     for (int j = -historyKeyframeSearchNum; j <= historyKeyframeSearchNum; ++j){
+        //         if (RSclosestHistoryFrameID + j < 0 || RSclosestHistoryFrameID + j > latestFrameIDLoopCloure)
+        //             continue;
+        //         *RSnearHistorySurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[RSclosestHistoryFrameID+j], &cloudKeyPoses6D->points[RSclosestHistoryFrameID+j]);
+        //         *RSnearHistorySurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[RSclosestHistoryFrameID+j],   &cloudKeyPoses6D->points[RSclosestHistoryFrameID+j]);
+        //     }
+        //     downSizeFilterHistoryKeyFrames.setInputCloud(RSnearHistorySurfKeyFrameCloud);
+        //     downSizeFilterHistoryKeyFrames.filter(*RSnearHistorySurfKeyFrameCloudDS);
+        // }
 
         /* 
          * 2. Scan context-based global localization 
          */
+
         SClatestSurfKeyFrameCloud->clear();
         SCnearHistorySurfKeyFrameCloud->clear();
         SCnearHistorySurfKeyFrameCloudDS->clear();
@@ -946,6 +1016,14 @@ public:
         SCclosestHistoryFrameID = detectResult.first;
         yawDiffRad = detectResult.second; // not use for v1 (because pcl icp withi initial somthing wrong...)
 
+        LOOPIDX loop_idx{latestFrameIDLoopCloure, SCclosestHistoryFrameID};
+        auto it = loopIndexContainer.find(loop_idx);
+        if (it != loopIndexContainer.end())
+        {
+            std::cout << "this key has looped " << latestFrameIDLoopCloure << ",history indx " << SCclosestHistoryFrameID << std::endl;
+            return false;
+        }
+
         // if all close, reject
         if (SCclosestHistoryFrameID == -1){ 
             return false;
@@ -954,8 +1032,13 @@ public:
         // save latest key frames: query ptcloud (corner points + surface points)
         // NOTE: using "closestHistoryFrameID" to make same root of submap points to get a direct relative between the query point cloud (latestSurfKeyFrameCloud) and the map (nearHistorySurfKeyFrameCloud). by giseop
         // i.e., set the query point cloud within mapside's local coordinate
-        *SClatestSurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[latestFrameIDLoopCloure], &cloudKeyPoses6D->points[SCclosestHistoryFrameID]);         
-        *SClatestSurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[latestFrameIDLoopCloure],   &cloudKeyPoses6D->points[SCclosestHistoryFrameID]); 
+        
+        auto pose = cloudKeyPoses6D->points[latestFrameIDLoopCloure];
+        pose.x = cloudKeyPoses6D->points[SCclosestHistoryFrameID].x;
+        pose.y = cloudKeyPoses6D->points[SCclosestHistoryFrameID].y;
+        pose.z = cloudKeyPoses6D->points[SCclosestHistoryFrameID].z;
+        *SClatestSurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[latestFrameIDLoopCloure], &pose);         
+        *SClatestSurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[latestFrameIDLoopCloure],   &pose); 
 
         pcl::PointCloud<PointType>::Ptr SChahaCloud(new pcl::PointCloud<PointType>());
         int cloudSize = SClatestSurfKeyFrameCloud->points.size();
@@ -994,7 +1077,8 @@ public:
 
         if (cloudKeyPoses3D->points.empty() == true)
             return;
-
+        
+        *copy_cloudKeyPoses6D = *cloudKeyPoses6D;
         // try to find close key frame if there are any
         if (potentialLoopFlag == false){
             if (detectLoopClosure() == true){
@@ -1119,17 +1203,17 @@ public:
                 
                 std::lock_guard<std::mutex> lock(mtx);
                 // gtSAMgraph.add(BetweenFactor<Pose3>(latestFrameIDLoopCloure, closestHistoryFrameID, poseFrom.between(poseTo), constraintNoise)); // original 
-                float noiseScore = icp.getFitnessScore();
+                float noiseScore = 0.3;
                 Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
                 noiseModel::Base::shared_ptr robust_noise = gtsam::noiseModel::Robust::Create(
-                    gtsam::noiseModel::mEstimator::Cauchy::Create(1), // optional: replacing Cauchy by DCS or GemanMcClure
+                    gtsam::noiseModel::mEstimator::Cauchy::Create(1.5), // optional: replacing Cauchy by DCS or GemanMcClure
                     gtsam::noiseModel::Diagonal::Variances(Vector6)
                 );
                 loopIndexQueue.push_back(make_pair(latestFrameIDLoopCloure, SCclosestHistoryFrameID));
                 loopPoseQueue.push_back(poseFrom.between(poseTo));
                 loopNoiseQueue.push_back(robust_noise);
-                
-                gtSAMgraph.resize(0);
+                LOOPIDX loop_idx{latestFrameIDLoopCloure, SCclosestHistoryFrameID};
+                loopIndexContainer.insert(std::pair<LOOPIDX, int>(loop_idx, 1));
             }
         }
 
@@ -1709,6 +1793,7 @@ public:
                 cloudKeyPoses6D->points[i].roll  = isamCurrentEstimate.at<Pose3>(i).rotation().pitch();
                 cloudKeyPoses6D->points[i].pitch = isamCurrentEstimate.at<Pose3>(i).rotation().yaw();
                 cloudKeyPoses6D->points[i].yaw   = isamCurrentEstimate.at<Pose3>(i).rotation().roll();
+
             }
 
             aLoopIsClosed = false;
