@@ -1037,9 +1037,9 @@ public:
         pose.x = cloudKeyPoses6D->points[SCclosestHistoryFrameID].x;
         pose.y = cloudKeyPoses6D->points[SCclosestHistoryFrameID].y;
         pose.z = cloudKeyPoses6D->points[SCclosestHistoryFrameID].z;
-        *SClatestSurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[latestFrameIDLoopCloure], &pose);         
-        *SClatestSurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[latestFrameIDLoopCloure],   &pose); 
-
+        *SClatestSurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[latestFrameIDLoopCloure], &cloudKeyPoses6D->points[SCclosestHistoryFrameID]);         
+        *SClatestSurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[latestFrameIDLoopCloure],   &cloudKeyPoses6D->points[SCclosestHistoryFrameID]); 
+        // *SClatestSurfKeyFrameCloud += *transformPointCloud(outlierCloudKeyFrames[latestFrameIDLoopCloure],   &cloudKeyPoses6D->points[SCclosestHistoryFrameID]); 
         pcl::PointCloud<PointType>::Ptr SChahaCloud(new pcl::PointCloud<PointType>());
         int cloudSize = SClatestSurfKeyFrameCloud->points.size();
         for (int i = 0; i < cloudSize; ++i){
@@ -1056,6 +1056,7 @@ public:
                 continue;
             *SCnearHistorySurfKeyFrameCloud += *transformPointCloud(cornerCloudKeyFrames[SCclosestHistoryFrameID+j], &cloudKeyPoses6D->points[SCclosestHistoryFrameID+j]);
             *SCnearHistorySurfKeyFrameCloud += *transformPointCloud(surfCloudKeyFrames[SCclosestHistoryFrameID+j],   &cloudKeyPoses6D->points[SCclosestHistoryFrameID+j]);
+            // *SCnearHistorySurfKeyFrameCloud += *transformPointCloud(outlierCloudKeyFrames[SCclosestHistoryFrameID+j],   &cloudKeyPoses6D->points[SCclosestHistoryFrameID+j]);
         }
         downSizeFilterHistoryKeyFrames.setInputCloud(SCnearHistorySurfKeyFrameCloud);
         downSizeFilterHistoryKeyFrames.filter(*SCnearHistorySurfKeyFrameCloudDS);
@@ -1203,15 +1204,27 @@ public:
                 
                 std::lock_guard<std::mutex> lock(mtx);
                 // gtSAMgraph.add(BetweenFactor<Pose3>(latestFrameIDLoopCloure, closestHistoryFrameID, poseFrom.between(poseTo), constraintNoise)); // original 
-                float noiseScore = 0.3;
-                Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
-                noiseModel::Base::shared_ptr robust_noise = gtsam::noiseModel::Robust::Create(
-                    gtsam::noiseModel::mEstimator::Cauchy::Create(1.5), // optional: replacing Cauchy by DCS or GemanMcClure
-                    gtsam::noiseModel::Diagonal::Variances(Vector6)
-                );
+                
+                float noiseScore = icp.getFitnessScore();
+                if(noiseScore < 0.06)
+                {
+                    Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
+                    noiseModel::Diagonal::shared_ptr constraintNoise = noiseModel::Diagonal::Variances(Vector6);
+                    loopNoiseQueue.push_back(constraintNoise);
+                }               
+                else
+                {
+                    float noiseScore = 0.3;
+                    Vector6 << noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
+                    noiseModel::Base::shared_ptr robust_noise = gtsam::noiseModel::Robust::Create(
+                        gtsam::noiseModel::mEstimator::Cauchy::Create(1.5), // optional: replacing Cauchy by DCS or GemanMcClure
+                        gtsam::noiseModel::Diagonal::Variances(Vector6)
+                    );
+                    loopNoiseQueue.push_back(robust_noise);
+                }
                 loopIndexQueue.push_back(make_pair(latestFrameIDLoopCloure, SCclosestHistoryFrameID));
                 loopPoseQueue.push_back(poseFrom.between(poseTo));
-                loopNoiseQueue.push_back(robust_noise);
+                
                 LOOPIDX loop_idx{latestFrameIDLoopCloure, SCclosestHistoryFrameID};
                 loopIndexContainer.insert(std::pair<LOOPIDX, int>(loop_idx, 1));
             }
@@ -1219,15 +1232,15 @@ public:
 
         // just for visualization
         // // publish corrected cloud
-        // if (pubIcpKeyFrames.getNumSubscribers() != 0){
-        //     pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
-        //     pcl::transformPointCloud (*latestSurfKeyFrameCloud, *closed_cloud, icp.getFinalTransformation());
-        //     sensor_msgs::PointCloud2 cloudMsgTemp;
-        //     pcl::toROSMsg(*closed_cloud, cloudMsgTemp);
-        //     cloudMsgTemp.header.stamp = ros::Time().fromSec(timeLaserOdometry);
-        //     cloudMsgTemp.header.frame_id = "/camera_init";
-        //     pubIcpKeyFrames.publish(cloudMsgTemp);
-        // }   
+        if (pubIcpKeyFrames.getNumSubscribers() != 0){
+            pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
+            pcl::transformPointCloud (*SClatestSurfKeyFrameCloud, *closed_cloud, correctionCameraFrame);
+            sensor_msgs::PointCloud2 cloudMsgTemp;
+            pcl::toROSMsg(*closed_cloud, cloudMsgTemp);
+            cloudMsgTemp.header.stamp = ros::Time().fromSec(timeLaserOdometry);
+            cloudMsgTemp.header.frame_id = "camera_init";
+            pubIcpKeyFrames.publish(cloudMsgTemp);
+        }   
 
         // flagging
         aLoopIsClosed = true;
